@@ -41,7 +41,6 @@ jobs:
             const tokenData = await tokenRes.json();
             const accessToken = tokenData.access_token;
             if (!accessToken) { console.log("Auth failed:", JSON.stringify(tokenData)); return; }
-            console.log("✅ Google Drive authenticated");
 
             const searchRes = await fetch(
               `https://www.googleapis.com/drive/v3/files?q='17Ry-JFX2xdDM7TJNArCQ26lbbDW2JEwf'+in+parents+and+mimeType%3D'application%2Fpdf'+and+trashed%3Dfalse&orderBy=modifiedTime+desc&pageSize=1&fields=files(id,name)`,
@@ -50,7 +49,6 @@ jobs:
             const searchData = await searchRes.json();
             if (!searchData.files || searchData.files.length === 0) { console.log("No PDF found."); return; }
             const file = searchData.files[0];
-            console.log(`Found: ${file.name}`);
 
             const dlRes = await fetch(
               `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
@@ -67,60 +65,58 @@ jobs:
                 "content-type": "application/json"
               },
               body: JSON.stringify({
-                model: "claude-sonnet-4-20250514",
+                model: "claude-3-5-sonnet-20240620",
                 max_tokens: 1024,
                 messages: [{
                   role: "user",
                   content: [
                     { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-                    { type: "text", text: `Look at this flight crew schedule PDF. Find the row with the name "Paulo" in the Captains section.
-            Extract his schedule for the entire month.
-            Look carefully at the title or header of the PDF to find the correct month and year.
-            Return ONLY a JSON object in this exact format, nothing else:
-            {"month":"April","year":2026,"days":{"1":"R","2":"R",...etc}}
-            Important notes:
-            - The year is 2026.
-            - The month may not start on day 1 - check column headers carefully.
-            - Use exactly: R = working/reserve, X = off, V = vacation, PT = proficiency training, PC = proficiency check, EET = simulator training.
-            - Only include days in the column headers.
-            - Return only raw JSON, no markdown or backticks.` }
+                    { type: "text", text: `Look at this flight crew schedule PDF. Find the row with the name "Paulo" in the Captains section. Extract his schedule for the entire month. Return ONLY a JSON object: {"month":"MonthName","year":2026,"days":{"1":"R","2":"X",...}}` }
                   ]
                 }]
               })
             });
             const claudeData = await claudeRes.json();
             const responseText = claudeData.content[0].text;
-            console.log(`Claude: ${responseText.substring(0, 100)}...`);
             const clean = responseText.replace(/```json|```/g, "").trim();
             const schedule = JSON.parse(clean);
-            console.log(`✅ Schedule: ${schedule.month} ${schedule.year}`);
 
             const days = schedule.days;
             const allDays = Object.keys(days).map(Number).sort((a,b) => a-b);
-            const totalR = allDays.filter(d => days[d] === "R").length;
-            const totalX = allDays.filter(d => days[d] === "X").length;
-            const totalV = allDays.filter(d => days[d] === "V").length;
-            const firstDayNum = allDays[0];
-            const firstDay = new Date(`${schedule.month} ${firstDayNum}, ${schedule.year}`).getDay();
-            const scheduleStr = allDays.map(d => `${d}:${days[d]}`).join(",");
+            const today = new Date();
+            const currentDay = today.getUTCDate();
+            const isCurrentMonth = schedule.month.toLowerCase() === today.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' }).toLowerCase();
+
+            const calendarData = allDays.map(d => {
+              const status = days[d];
+              const isR = status === 'R';
+              const isFirstR = isR && days[d - 1] !== 'R';
+              const isLastR = isR && days[d + 1] !== 'R';
+              let type = 'off';
+              if (isFirstR || isLastR) type = 'buffer';
+              else if (status === 'R') type = 'working';
+              else if (status === 'V') type = 'vacation';
+              const todayClass = (isCurrentMonth && d === currentDay) ? 'today' : '';
+              return `${d}:${type}:${todayClass}`;
+            }).join(',');
+
+            const firstDayOfWeek = new Date(`${schedule.month} ${allDays[0]}, ${schedule.year}`).getDay();
 
             const payload = {
               merge_variables: {
                 schedule_month: schedule.month,
                 schedule_year: String(schedule.year),
-                schedule_days: scheduleStr,
-                first_day: String(firstDay),
-                total_r: String(totalR),
-                total_x: String(totalX),
-                total_v: String(totalV),
+                calendar_data: calendarData,
+                first_day: String(firstDayOfWeek),
+                total_r: String(allDays.filter(d => days[d] === "R").length),
+                total_x: String(allDays.filter(d => days[d] === "X").length),
+                total_v: String(allDays.filter(d => days[d] === "V").length),
                 cache_bust: Date.now().toString()
               }
             };
 
-            const trmnlRes = await fetch(process.env.TRMNL_WEBHOOK_SCHEDULE, {
+            await fetch(process.env.TRMNL_WEBHOOK_SCHEDULE, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(payload)
             });
-            console.log(`TRMNL: ${trmnlRes.ok ? "✅" : "❌"} ${trmnlRes.status}`);
-            console.log(`${schedule.month} ${schedule.year}: ${totalR} working, ${totalX} off, ${totalV} vacation`);
