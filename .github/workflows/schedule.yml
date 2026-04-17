@@ -40,14 +40,14 @@ jobs:
             });
             const tokenData = await tokenRes.json();
             const accessToken = tokenData.access_token;
-            if (!accessToken) { console.log("Auth failed:", JSON.stringify(tokenData)); return; }
+            if (!accessToken) { throw new Error("Google Auth Failed"); }
 
             const searchRes = await fetch(
               `https://www.googleapis.com/drive/v3/files?q='17Ry-JFX2xdDM7TJNArCQ26lbbDW2JEwf'+in+parents+and+mimeType%3D'application%2Fpdf'+and+trashed%3Dfalse&orderBy=modifiedTime+desc&pageSize=1&fields=files(id,name)`,
               { headers: { Authorization: `Bearer ${accessToken}` } }
             );
             const searchData = await searchRes.json();
-            if (!searchData.files || searchData.files.length === 0) { console.log("No PDF found."); return; }
+            if (!searchData.files || searchData.files.length === 0) { throw new Error("No PDF found"); }
             const file = searchData.files[0];
 
             const dlRes = await fetch(
@@ -71,15 +71,13 @@ jobs:
                   role: "user",
                   content: [
                     { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-                    { type: "text", text: `Look at this flight crew schedule PDF. Find the row with the name "Paulo" in the Captains section. Extract his schedule for the entire month. Return ONLY a JSON object: {"month":"MonthName","year":2026,"days":{"1":"R","2":"X",...}}` }
+                    { type: "text", text: `Find "Paulo" in Captains. Return JSON: {"month":"MonthName","year":2026,"days":{"1":"R","2":"X",...}}` }
                   ]
                 }]
               })
             });
             const claudeData = await claudeRes.json();
-            const responseText = claudeData.content[0].text;
-            const clean = responseText.replace(/```json|```/g, "").trim();
-            const schedule = JSON.parse(clean);
+            const schedule = JSON.parse(claudeData.content[0].text.replace(/```json|```/g, "").trim());
 
             const days = schedule.days;
             const allDays = Object.keys(days).map(Number).sort((a,b) => a-b);
