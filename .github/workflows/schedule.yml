@@ -41,7 +41,6 @@ jobs:
             const tokenData = await tokenRes.json();
             const accessToken = tokenData.access_token;
 
-            // Direct access to your April PDF
             const fileId = '1H45zcAJQlaKT1bu0ABODaJlhbfUq-nOY';
             const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
               headers: { Authorization: `Bearer ${accessToken}` }
@@ -57,21 +56,32 @@ jobs:
                 "content-type": "application/json"
               },
               body: JSON.stringify({
-                // Using the standard Sonnet model name
                 model: "claude-3-5-sonnet-20240620",
                 max_tokens: 1024,
                 messages: [{
                   role: "user",
                   content: [
                     { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-                    { type: "text", text: `Find "Paulo" in Captains. Return JSON: {"month":"April","year":2026,"days":{"1":"R","2":"X",...}}` }
+                    { type: "text", text: `Find "Paulo" in Captains. Return ONLY a raw JSON object: {"month":"April","year":2026,"days":{"1":"R","2":"X",...}}` }
                   ]
                 }]
               })
             });
+            
             const claudeData = await claudeRes.json();
-            const schedule = JSON.parse(claudeData.content[0].text.replace(/```json|```/g, "").trim());
-
+            
+            // Safety Check for Claude Response
+            if (!claudeData.content || !claudeData.content[0]) {
+              throw new Error("Claude returned an empty response. Check your API Key!");
+            }
+            
+            const responseText = claudeData.content[0].text;
+            const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) {
+              throw new Error("Could not find JSON in Claude's response: " + responseText);
+            }
+            
+            const schedule = JSON.parse(jsonMatch[0]);
             const days = schedule.days;
             const allDays = Object.keys(days).map(Number).sort((a,b) => a-b);
             const today = new Date();
@@ -111,4 +121,4 @@ jobs:
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(payload)
             });
-            console.log("✅ April Schedule Updated!");
+            console.log("✅ April Schedule Updated Successfully!");
