@@ -1,0 +1,126 @@
+name: Update TRMNL Schedule
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  update-schedule:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read PDF and update schedule
+        uses: actions/github-script@v7
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TRMNL_WEBHOOK_SCHEDULE: ${{ secrets.TRMNL_WEBHOOK_SCHEDULE }}
+        with:
+          script: |
+            const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+            const jwtHeader = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
+            const now = Math.floor(Date.now() / 1000);
+            const jwtClaim = Buffer.from(JSON.stringify({
+              iss: creds.client_email,
+              scope: "https://www.googleapis.com/auth/drive.readonly",
+              aud: "https://oauth2.googleapis.com/token",
+              exp: now + 3600,
+              iat: now
+            })).toString("base64url");
+
+            const crypto = require("crypto");
+            const sign = crypto.createSign("RSA-SHA256");
+            sign.update(`${jwtHeader}.${jwtClaim}`);
+            const signature = sign.sign(creds.private_key, "base64url");
+            const jwt = `${jwtHeader}.${jwtClaim}.${signature}`;
+
+            const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`
+            });
+            const tokenData = await tokenRes.json();
+            const accessToken = tokenData.access_token;
+            if (!accessToken) { console.log("Auth failed:", JSON.stringify(tokenData)); return; }
+            console.log("✅ Google Drive authenticated");
+
+            const searchRes = await fetch(
+              `https://www.googleapis.com/drive/v3/files?q='17Ry-JFX2xdDM7TJNArCQ26lbbDW2JEwf'+in+parents+and+mimeType%3D'application%2Fpdf'+and+trashed%3Dfalse&orderBy=modifiedTime+desc&pageSize=1&fields=files(id,name)`,
+              { headers: { Authorization: `Bearer ${accessToken}` } }
+            );
+            const searchData = await searchRes.json();
+            if (!searchData.files || searchData.files.length === 0) { console.log("No PDF found."); return; }
+            const file = searchData.files[0];
+            console.log(`Found: ${file.name}`);
+
+            const dlRes = await fetch(
+              `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
+              { headers: { Authorization: `Bearer ${accessToken}` } }
+            );
+            const pdfBuffer = await dlRes.arrayBuffer();
+            const base64 = Buffer.from(pdfBuffer).toString("base64");
+
+            const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
+              method: "POST",
+              headers: {
+                "x-api-key": process.env.ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+              },
+              body: JSON.stringify({
+                model: "claude-sonnet-4-20250514",
+                max_tokens: 1024,
+                messages: [{
+                  role: "user",
+                  content: [
+                    { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
+                    { type: "text", text: `Look at this flight crew schedule PDF. Find the row with the name "Paulo" in the Captains section.
+            Extract his schedule for the entire month.
+            Look carefully at the title or header of the PDF to find the correct month and year.
+            Return ONLY a JSON object in this exact format, nothing else:
+            {"month":"April","year":2026,"days":{"1":"R","2":"R",...etc}}
+            Important notes:
+            - The year is 2026.
+            - The month may not start on day 1 - check column headers carefully.
+            - Use exactly: R = working/reserve, X = off, V = vacation, PT = proficiency training, PC = proficiency check, EET = simulator training.
+            - Only include days in the column headers.
+            - Return only raw JSON, no markdown or backticks.` }
+                  ]
+                }]
+              })
+            });
+            const claudeData = await claudeRes.json();
+            const responseText = claudeData.content[0].text;
+            console.log(`Claude: ${responseText.substring(0, 100)}...`);
+            const clean = responseText.replace(/```json|```/g, "").trim();
+            const schedule = JSON.parse(clean);
+            console.log(`✅ Schedule: ${schedule.month} ${schedule.year}`);
+
+            const days = schedule.days;
+            const allDays = Object.keys(days).map(Number).sort((a,b) => a-b);
+            const totalR = allDays.filter(d => days[d] === "R").length;
+            const totalX = allDays.filter(d => days[d] === "X").length;
+            const totalV = allDays.filter(d => days[d] === "V").length;
+            const firstDayNum = allDays[0];
+            const firstDay = new Date(`${schedule.month} ${firstDayNum}, ${schedule.year}`).getDay();
+            const scheduleStr = allDays.map(d => `${d}:${days[d]}`).join(",");
+
+            const payload = {
+              merge_variables: {
+                schedule_month: schedule.month,
+                schedule_year: String(schedule.year),
+                schedule_days: scheduleStr,
+                first_day: String(firstDay),
+                total_r: String(totalR),
+                total_x: String(totalX),
+                total_v: String(totalV),
+                cache_bust: Date.now().toString()
+              }
+            };
+
+            const trmnlRes = await fetch(process.env.TRMNL_WEBHOOK_SCHEDULE, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+            console.log(`TRMNL: ${trmnlRes.ok ? "✅" : "❌"} ${trmnlRes.status}`);
+            console.log(`${schedule.month} ${schedule.year}: ${totalR} working, ${totalX} off, ${totalV} vacation`);
