@@ -1,18 +1,15 @@
 name: Update TRMNL Schedule
 on:
-  schedule:
-    - cron: '0 6 * * *'
   workflow_dispatch:
 
 jobs:
   update-schedule:
     runs-on: ubuntu-latest
     steps:
-      - name: Read PDF and update schedule
+      - name: Debug Google Drive Access
         uses: actions/github-script@v7
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TRMNL_WEBHOOK_SCHEDULE: ${{ secrets.TRMNL_WEBHOOK_SCHEDULE }}
         with:
           script: |
@@ -40,81 +37,21 @@ jobs:
             });
             const tokenData = await tokenRes.json();
             const accessToken = tokenData.access_token;
-            if (!accessToken) { throw new Error("Google Auth Failed"); }
 
+            console.log("--- DEBUG START ---");
+            const folderId = '17Ry-JFX2xdDM7TJNArCQ26lbbDW2JEwf';
+            
+            // This search asks for EVERYTHING in that folder, not just PDFs
             const searchRes = await fetch(
-              `https://www.googleapis.com/drive/v3/files?q='17Ry-JFX2xdDM7TJNArCQ26lbbDW2JEwf'+in+parents+and+mimeType%3D'application%2Fpdf'+and+trashed%3Dfalse&orderBy=modifiedTime+desc&pageSize=1&fields=files(id,name)`,
+              `https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents+and+trashed%3Dfalse&fields=files(id,name,mimeType)`,
               { headers: { Authorization: `Bearer ${accessToken}` } }
             );
             const searchData = await searchRes.json();
-            if (!searchData.files || searchData.files.length === 0) { throw new Error("No PDF found"); }
-            const file = searchData.files[0];
-
-            const dlRes = await fetch(
-              `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
-              { headers: { Authorization: `Bearer ${accessToken}` } }
-            );
-            const pdfBuffer = await dlRes.arrayBuffer();
-            const base64 = Buffer.from(pdfBuffer).toString("base64");
-
-            const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
-              method: "POST",
-              headers: {
-                "x-api-key": process.env.ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-              },
-              body: JSON.stringify({
-                model: "claude-3-5-sonnet-20240620",
-                max_tokens: 1024,
-                messages: [{
-                  role: "user",
-                  content: [
-                    { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-                    { type: "text", text: `Find "Paulo" in Captains. Return JSON: {"month":"MonthName","year":2026,"days":{"1":"R","2":"X",...}}` }
-                  ]
-                }]
-              })
-            });
-            const claudeData = await claudeRes.json();
-            const schedule = JSON.parse(claudeData.content[0].text.replace(/```json|```/g, "").trim());
-
-            const days = schedule.days;
-            const allDays = Object.keys(days).map(Number).sort((a,b) => a-b);
-            const today = new Date();
-            const currentDay = today.getUTCDate();
-            const isCurrentMonth = schedule.month.toLowerCase() === today.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' }).toLowerCase();
-
-            const calendarData = allDays.map(d => {
-              const status = days[d];
-              const isR = status === 'R';
-              const isFirstR = isR && days[d - 1] !== 'R';
-              const isLastR = isR && days[d + 1] !== 'R';
-              let type = 'off';
-              if (isFirstR || isLastR) type = 'buffer';
-              else if (status === 'R') type = 'working';
-              else if (status === 'V') type = 'vacation';
-              const todayClass = (isCurrentMonth && d === currentDay) ? 'today' : '';
-              return `${d}:${type}:${todayClass}`;
-            }).join(',');
-
-            const firstDayOfWeek = new Date(`${schedule.month} ${allDays[0]}, ${schedule.year}`).getDay();
-
-            const payload = {
-              merge_variables: {
-                schedule_month: schedule.month,
-                schedule_year: String(schedule.year),
-                calendar_data: calendarData,
-                first_day: String(firstDayOfWeek),
-                total_r: String(allDays.filter(d => days[d] === "R").length),
-                total_x: String(allDays.filter(d => days[d] === "X").length),
-                total_v: String(allDays.filter(d => days[d] === "V").length),
-                cache_bust: Date.now().toString()
-              }
-            };
-
-            await fetch(process.env.TRMNL_WEBHOOK_SCHEDULE, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload)
-            });
+            
+            if (searchData.files && searchData.files.length > 0) {
+              console.log(`Found ${searchData.files.length} files in folder:`);
+              searchData.files.forEach(f => console.log(`- Name: ${f.name} | Type: ${f.mimeType}`));
+            } else {
+              console.log("The folder appears completely empty to this script. Check Sharing permissions!");
+            }
+            console.log("--- DEBUG END ---");
