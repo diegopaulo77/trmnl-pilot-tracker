@@ -1,0 +1,117 @@
+name: Update TRMNL Location
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+
+jobs:
+  update-location:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update TRMNL displays
+        uses: actions/github-script@v7
+        env:
+          TRMNL_WEBHOOK_BWRY: ${{ secrets.TRMNL_WEBHOOK_BWRY }}
+          TRMNL_WEBHOOK_BW: ${{ secrets.TRMNL_WEBHOOK_BW }}
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+        with:
+          script: |
+            const now = new Date();
+            const yesterday = new Date(now - 24 * 60 * 60 * 1000);
+            const d1 = yesterday.toISOString().split('.')[0] + 'Z';
+            const d2 = now.toISOString().split('.')[0] + 'Z';
+
+            const feedUrl = `https://share.garmin.com/Feed/Share/J9DOX?d1=${d1}&d2=${d2}`;
+            const kmlRes = await fetch(feedUrl, { headers: { "Accept": "application/xml, text/xml" } });
+            if (!kmlRes.ok) { console.log(`MapShare feed error: ${kmlRes.status}`); return; }
+            const kmlText = await kmlRes.text();
+
+            const placemarkMatches = [...kmlText.matchAll(/<Placemark>([\s\S]*?)<\/Placemark>/g)];
+            if (!placemarkMatches || placemarkMatches.length === 0) { console.log("No location points found."); return; }
+
+            const points = [];
+            for (const match of placemarkMatches) {
+              const block = match[1];
+              const coordMatch = block.match(/<coordinates>\s*([-\d.]+),([-\d.]+)/);
+              const timeMatch = block.match(/<when>(.*?)<\/when>/);
+              if (coordMatch) {
+                points.push({
+                  lon: parseFloat(coordMatch[1]),
+                  lat: parseFloat(coordMatch[2]),
+                  time: timeMatch ? new Date(timeMatch[1]) : new Date(0)
+                });
+              }
+            }
+            if (points.length === 0) { console.log("No coordinates parsed."); return; }
+
+            points.sort((a, b) => a.time - b.time);
+            const latest = points[points.length - 1];
+            const { lat, lon } = latest;
+
+            // Reverse geocode
+            const geoRes = await fetch(
+              `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`,
+              { headers: { "User-Agent": "TRMNL-Garmin-Plugin/3.0" } }
+            );
+            const geoData = await geoRes.json();
+            const city = geoData.address?.city || geoData.address?.town || geoData.address?.village || geoData.address?.county || "Unknown area";
+            const country = geoData.address?.country || "";
+            const isHome = city.includes("Fort Lauderdale") || "Fort Lauderdale".includes(city);
+            const locationDisplay = country ? `${city}, ${country}` : city;
+
+            // Timezone
+            let timezoneId = "UTC";
+            try {
+              const timestamp = Math.floor(now.getTime() / 1000);
+              const tzRes = await fetch(`https://maps.googleapis.com/maps/api/timezone/json?location=${lat},${lon}&timestamp=${timestamp}&key=${process.env.GOOGLE_MAPS_API_KEY}`);
+              const tzData = await tzRes.json();
+              if (tzData.status === "OK") timezoneId = tzData.timeZoneId;
+            } catch(e) { console.log(`Timezone error: ${e.message}`); }
+
+            // Last seen
+            const diffMinutes = Math.round((now - latest.time) / 60000);
+            let timeAgo;
+            if (diffMinutes < 2) timeAgo = "Just now";
+            else if (diffMinutes < 60) timeAgo = `${diffMinutes} min ago`;
+            else {
+              const h = Math.floor(diffMinutes / 60);
+              const m = diffMinutes % 60;
+              timeAgo = m > 0 ? `${h}h ${m}m ago` : `${h}h ago`;
+            }
+
+            const formattedTime = latest.time.toLocaleString("en-US", {
+              month: "short", day: "numeric",
+              hour: "2-digit", minute: "2-digit",
+              timeZone: "UTC"
+            }) + " UTC";
+
+            const payload = {
+              merge_variables: {
+                location: locationDisplay,
+                is_home: isHome ? "true" : "false",
+                timezone_id: timezoneId,
+                time_ago: timeAgo,
+                formatted_time: formattedTime,
+                lat: lat.toFixed(4),
+                lon: lon.toFixed(4),
+                cache_bust: now.getTime().toString(),
+              }
+            };
+
+            // Send to BWRY
+            const bwryRes = await fetch(process.env.TRMNL_WEBHOOK_BWRY, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+            console.log(`BWRY: ${bwryRes.ok ? "✅" : "❌"} ${bwryRes.status}`);
+
+            // Send to BW
+            const bwRes = await fetch(process.env.TRMNL_WEBHOOK_BW, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+            console.log(`BW: ${bwRes.ok ? "✅" : "❌"} ${bwRes.status}`);
+
+            console.log(`✅ Done! ${locationDisplay} | isHome: ${isHome} | TZ: ${timezoneId} | ${timeAgo}`);
