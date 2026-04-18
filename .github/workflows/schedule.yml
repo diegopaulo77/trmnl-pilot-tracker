@@ -8,18 +8,18 @@ jobs:
   update-schedule:
     runs-on: ubuntu-latest
     steps:
-      - name: Process Schedule with Gemini
+      - name: Process Schedule with Claude
         uses: actions/github-script@v7
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TRMNL_WEBHOOK_SCHEDULE: ${{ secrets.TRMNL_WEBHOOK_SCHEDULE }}
         with:
           script: |
             const crypto = require('crypto');
             const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
             
-            // 1. Google Drive Auth
+            // 1. Google Drive Auth (unchanged, works perfectly)
             const jwtHeader = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
             const now = Math.floor(Date.now() / 1000);
             const jwtClaim = Buffer.from(JSON.stringify({
@@ -43,7 +43,7 @@ jobs:
             const tokenData = await tokenRes.json();
             const access_token = tokenData.access_token;
 
-            // 2. Search the Folder for the Newest PDF
+            // 2. Search & Download PDF
             const folderId = '17Ry-JFX2xdDM7TJNArCQ26lbbDW2JEwf';
             const searchRes = await fetch(
               `https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents+and+mimeType%3D'application%2Fpdf'+and+trashed%3Dfalse&orderBy=modifiedTime+desc&pageSize=1&fields=files(id,name)`,
@@ -52,23 +52,20 @@ jobs:
             const searchData = await searchRes.json();
             const file = searchData.files[0];
 
-            // 3. Download the PDF
             const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, {
               headers: { Authorization: `Bearer ${access_token}` }
             });
             const base64PDF = Buffer.from(await dlRes.arrayBuffer()).toString("base64");
 
-            // 4. Gemini API Call
-            const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+            // 3. CLAUDE API CALL
             const promptText = `
             You are an expert data extractor reading an aviation bid award schedule grid. 
             
             Follow these EXACT steps:
             1. Find the section for 'Captains' and locate the exact row for the pilot 'Paulo'.
             2. Read that row horizontally, cell by cell, from left to right.
-            3. The columns correspond sequentially to the days of the month (Day 1, Day 2, Day 3... up to the last day).
-            4. There is exactly ONE value per day. 
-            5. PAY EXTREME ATTENTION to visual spacing and column alignment. If a column is visually blank or empty for that day, you MUST output 'X'. Do not skip days.
+            3. The columns correspond sequentially to the days of the month.
+            4. PAY EXTREME ATTENTION to visual spacing and column alignment. If a column is visually blank or empty for that day, you MUST output 'X'. 
             
             Use this STRICT decoding legend:
             - 'R' = R
@@ -76,30 +73,51 @@ jobs:
             - Blank cell, empty space, or 'X' = X
             - Any other alphanumeric code (PT, PC, LC, etc.) = SIM
             
-            Return ONLY a valid JSON object. No markdown, no formatting blocks, no commentary.
+            Return ONLY a valid JSON object. No markdown, no formatting blocks.
             Format: {"month":"April","year":2026,"days":{"1":"R","2":"X","3":"SIM","4":"V"}}
             `;
             
-            const geminiRes = await fetch(geminiUrl, {
+            const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "x-api-key": process.env.ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "pdfs-2024-09-25",
+                "content-type": "application/json"
+              },
               body: JSON.stringify({
-                contents: [{ parts: [
-                  { inline_data: { mime_type: "application/pdf", data: base64PDF } },
-                  { text: promptText }
-                ]}]
+                model: "claude-3-5-sonnet-latest",
+                max_tokens: 1000,
+                messages: [{
+                  role: "user",
+                  content: [
+                    {
+                      type: "document",
+                      source: { type: "base64", media_type: "application/pdf", data: base64PDF }
+                    },
+                    {
+                      type: "text",
+                      text: promptText
+                    }
+                  ]
+                }]
               })
             });
             
-            const gData = await geminiRes.json();
-            const rawText = gData.candidates[0].content.parts[0].text.replace(/```json|```/g, "").trim();
+            const cData = await claudeRes.json();
+            
+            if (cData.error) {
+              throw new Error(`Claude API Error: ${JSON.stringify(cData.error)}`);
+            }
+            
+            const rawText = cData.content[0].text.replace(/```json|```/g, "").trim();
             const schedule = JSON.parse(rawText);
 
-            console.log("=== GEMINI DECODED SCHEDULE ===");
+            console.log("=== CLAUDE DECODED SCHEDULE ===");
             console.log(JSON.stringify(schedule, null, 2));
             console.log("===============================");
 
-            // 5. Build TRMNL Data
+            // 4. Send to TRMNL
             const days = schedule.days;
             const allDays = Object.keys(days).map(Number).sort((a,b)=>a-b);
             
