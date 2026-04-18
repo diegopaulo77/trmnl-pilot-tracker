@@ -19,10 +19,33 @@ jobs:
             const crypto = require('crypto');
             const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
             
-            // 1. Google Drive Auth
-            const jwt = crypto.createSign("RSA-SHA256").update(Buffer.from(JSON.stringify({alg:"RS256",typ:"JWT"})).toString("base64url")+'.'+Buffer.from(JSON.stringify({iss:creds.client_email,scope:"https://www.googleapis.com/auth/drive.readonly",aud:"https://oauth2.googleapis.com/token",exp:Math.floor(Date.now()/1000)+3600,iat:Math.floor(Date.now()/1000)})).toString("base64url")).sign(creds.private_key, "base64url");
-            const tokenRes = await fetch("https://oauth2.googleapis.com/token", {method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:`grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`});
-            const {access_token} = await tokenRes.json();
+            // 1. Google Drive Auth (Restored to the working version)
+            const jwtHeader = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
+            const now = Math.floor(Date.now() / 1000);
+            const jwtClaim = Buffer.from(JSON.stringify({
+              iss: creds.client_email,
+              scope: "https://www.googleapis.com/auth/drive.readonly",
+              aud: "https://oauth2.googleapis.com/token",
+              exp: now + 3600,
+              iat: now
+            })).toString("base64url");
+
+            const sign = crypto.createSign("RSA-SHA256");
+            sign.update(`${jwtHeader}.${jwtClaim}`);
+            const signature = sign.sign(creds.private_key, "base64url");
+            const jwt = `${jwtHeader}.${jwtClaim}.${signature}`;
+
+            const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`
+            });
+            const tokenData = await tokenRes.json();
+            
+            if (!tokenData.access_token) {
+              throw new Error(`Auth failed! Google responded: ${JSON.stringify(tokenData)}`);
+            }
+            const access_token = tokenData.access_token;
 
             // 2. Search the Folder for the Newest PDF
             const folderId = '17Ry-JFX2xdDM7TJNArCQ26lbbDW2JEwf';
