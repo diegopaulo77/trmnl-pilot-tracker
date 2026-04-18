@@ -19,7 +19,7 @@ jobs:
             const crypto = require('crypto');
             const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
             
-            // 1. Google Drive Auth (unchanged, works perfectly)
+            // 1. Google Drive Auth
             const jwtHeader = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
             const now = Math.floor(Date.now() / 1000);
             const jwtClaim = Buffer.from(JSON.stringify({
@@ -51,13 +51,14 @@ jobs:
             );
             const searchData = await searchRes.json();
             const file = searchData.files[0];
+            console.log(`Found: ${file.name}`);
 
             const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, {
               headers: { Authorization: `Bearer ${access_token}` }
             });
             const base64PDF = Buffer.from(await dlRes.arrayBuffer()).toString("base64");
 
-            // 3. CLAUDE API CALL
+            // 3. Claude API Call
             const promptText = `
             You are an expert data extractor reading an aviation bid award schedule grid. 
             
@@ -73,7 +74,7 @@ jobs:
             - Blank cell, empty space, or 'X' = X
             - Any other alphanumeric code (PT, PC, LC, etc.) = SIM
             
-            Return ONLY a valid JSON object. No markdown, no formatting blocks.
+            Return ONLY a valid JSON object. No markdown, no formatting blocks, no explanation, no preamble, no text before or after the JSON. Your entire response must be parseable JSON and nothing else.
             Format: {"month":"April","year":2026,"days":{"1":"R","2":"X","3":"SIM","4":"V"}}
             `;
             
@@ -82,12 +83,12 @@ jobs:
               headers: {
                 "x-api-key": process.env.ANTHROPIC_API_KEY,
                 "anthropic-version": "2023-06-01",
-                "anthropic-beta": "pdfs-2024-09-25",
                 "content-type": "application/json"
               },
               body: JSON.stringify({
                 model: "claude-sonnet-4-20250514",
                 max_tokens: 1000,
+                system: "You are a JSON-only data extractor. You must respond with nothing but valid JSON. No text, no explanation, no markdown.",
                 messages: [{
                   role: "user",
                   content: [
@@ -111,6 +112,7 @@ jobs:
             }
             
             const rawText = cData.content[0].text.replace(/```json|```/g, "").trim();
+            console.log(`Claude raw: ${rawText.substring(0, 100)}...`);
             const schedule = JSON.parse(rawText);
 
             console.log("=== CLAUDE DECODED SCHEDULE ===");
@@ -147,7 +149,7 @@ jobs:
 
             const firstDay = new Date(`${schedule.month} 1, ${schedule.year}`).getDay();
 
-            await fetch(process.env.TRMNL_WEBHOOK_SCHEDULE, {
+            const trmnlRes = await fetch(process.env.TRMNL_WEBHOOK_SCHEDULE, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -163,3 +165,5 @@ jobs:
                 }
               })
             });
+            console.log(`TRMNL: ${trmnlRes.ok ? "✅" : "❌"} ${trmnlRes.status}`);
+            console.log(`${schedule.month} ${schedule.year}: ${allDays.length} days processed`);
