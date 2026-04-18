@@ -24,11 +24,34 @@ jobs:
             const tokenRes = await fetch("https://oauth2.googleapis.com/token", {method:"POST",body:`grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`});
             const {access_token} = await tokenRes.json();
 
-            // 2. Get April PDF
-            const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/1H45zcAJQlaKT1bu0ABODaJlhbfUq-nOY?alt=media`, {headers:{Authorization:`Bearer ${access_token}`}});
+            // 2. Search the Folder for the Newest PDF
+            const folderId = '17Ry-JFX2xdDM7TJNArCQ26lbbDW2JEwf';
+            const searchRes = await fetch(
+              `https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents+and+mimeType%3D'application%2Fpdf'+and+trashed%3Dfalse&orderBy=modifiedTime+desc&pageSize=1&fields=files(id,name)`,
+              { headers: { Authorization: `Bearer ${accessToken}` } }
+            );
+            const searchData = await searchRes.json();
+            
+            if (!searchData.files || searchData.files.length === 0) {
+              throw new Error(`No PDF found in folder! Drive response: ${JSON.stringify(searchData)}`);
+            }
+            
+            const file = searchData.files[0];
+            console.log(`Processing newest schedule: ${file.name}`);
+
+            // 3. Download the PDF
+            const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, {
+              headers: { Authorization: `Bearer ${accessToken}` }
+            });
+            
+            if (!dlRes.ok) {
+              const driveError = await dlRes.text();
+              throw new Error(`Google Drive blocked download! Status: ${dlRes.status} | Details: ${driveError}`);
+            }
+            
             const base64PDF = Buffer.from(await dlRes.arrayBuffer()).toString("base64");
 
-            // 3. Gemini API Call (UPGRADED TO 2.5 FLASH)
+            // 4. Gemini API Call
             const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
             const geminiRes = await fetch(geminiUrl, {
               method: "POST",
@@ -43,13 +66,12 @@ jobs:
             
             const gData = await geminiRes.json();
             if (!gData.candidates) {
-              console.log(JSON.stringify(gData));
-              throw new Error("Gemini error - check logs");
+              throw new Error(`Gemini error: ${JSON.stringify(gData)}`);
             }
             
             const schedule = JSON.parse(gData.candidates[0].content.parts[0].text.replace(/```json|```/g, "").trim());
 
-            // 4. Send to TRMNL
+            // 5. Send to TRMNL
             const days = schedule.days;
             const allDays = Object.keys(days).map(Number).sort((a,b)=>a-b);
             const calendarData = allDays.map(d => `${d}:${days[d]==='R'?'working':(days[d]==='V'?'vacation':'off')}:`).join(',');
