@@ -42,9 +42,7 @@ jobs:
             const tokenData = await tokenRes.json();
             const accessToken = tokenData.access_token;
 
-            // DIRECT FILE ID (This avoids the folder permission error)
             const fileId = '1H45zcAJQlaKT1bu0ABODaJlhbfUq-nOY';
-
             const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
               headers: { Authorization: `Bearer ${accessToken}` }
             });
@@ -58,15 +56,24 @@ jobs:
               body: JSON.stringify({
                 contents: [{ parts: [
                   { inline_data: { mime_type: "application/pdf", data: base64PDF } },
-                  { text: "Find Paulo in Captains. Return ONLY raw JSON: {\"month\":\"April\",\"year\":2026,\"days\":{\"1\":\"R\",\"2\":\"X\"...}}" }
+                  { text: "Locate 'Paulo' in the 'Captains' section of this PDF. Extract his schedule for the entire month. Output ONLY a valid JSON object. No markdown, no commentary. Format: {\"month\":\"MonthName\",\"year\":2026,\"days\":{\"1\":\"R\",\"2\":\"X\"...}}" }
                 ]}]
               })
             });
             
             const geminiData = await geminiRes.json();
-            const responseText = geminiData.candidates[0].content.parts[0].text;
-            const schedule = JSON.parse(responseText.match(/\{[\s\S]*\}/)[0]);
-
+            
+            // IMPROVED PARSING LOGIC
+            if (!geminiData.candidates || !geminiData.candidates[0].content.parts[0].text) {
+                throw new Error("Gemini returned an empty or invalid response.");
+            }
+            
+            const rawText = geminiData.candidates[0].content.parts[0].text;
+            const jsonStart = rawText.indexOf('{');
+            const jsonEnd = rawText.lastIndexOf('}') + 1;
+            const jsonText = rawText.substring(jsonStart, jsonEnd);
+            
+            const schedule = JSON.parse(jsonText);
             const days = schedule.days;
             const allDays = Object.keys(days).map(Number).sort((a,b) => a-b);
             const today = new Date();
@@ -97,7 +104,8 @@ jobs:
                   total_r: String(allDays.filter(d => days[d] === "R").length),
                   total_x: String(allDays.filter(d => days[d] === "X").length),
                   total_v: String(allDays.filter(d => days[d] === "V").length),
-                  cache_bust: Date.now().toString()
+                  cache_bust: String(Date.now())
                 }
               })
             });
+            console.log("Successfully updated TRMNL!");
