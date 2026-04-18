@@ -19,89 +19,38 @@ jobs:
             const crypto = require('crypto');
             const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
             
-            const jwtHeader = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
-            const now = Math.floor(Date.now() / 1000);
-            const jwtClaim = Buffer.from(JSON.stringify({
-              iss: creds.client_email,
-              scope: "https://www.googleapis.com/auth/drive.readonly",
-              aud: "https://oauth2.googleapis.com/token",
-              exp: now + 3600,
-              iat: now
-            })).toString("base64url");
+            const jwt = crypto.createSign("RSA-SHA256").update(Buffer.from(JSON.stringify({alg:"RS256",typ:"JWT"})).toString("base64url")+'.'+Buffer.from(JSON.stringify({iss:creds.client_email,scope:"https://www.googleapis.com/auth/drive.readonly",aud:"https://oauth2.googleapis.com/token",exp:Math.floor(Date.now()/1000)+3600,iat:Math.floor(Date.now()/1000)})).toString("base64url")).sign(creds.private_key, "base64url");
+            const tokenRes = await fetch("https://oauth2.googleapis.com/token", {method:"POST",body:`grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`});
+            const {access_token} = await tokenRes.json();
 
-            const sign = crypto.createSign("RSA-SHA256");
-            sign.update(`${jwtHeader}.${jwtClaim}`);
-            const signature = sign.sign(creds.private_key, "base64url");
-            const jwt = `${jwtHeader}.${jwtClaim}.${signature}`;
+            const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/1H45zcAJQlaKT1bu0ABODaJlhbfUq-nOY?alt=media`, {headers:{Authorization:`Bearer ${access_token}`}});
+            const base64PDF = Buffer.from(await dlRes.arrayBuffer()).toString("base64");
 
-            const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+            // URL switched back to v1beta for PDF support
+            const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`, {
               method: "POST",
-              headers: { "Content-Type": "application/x-www-form-urlencoded" },
-              body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`
+              body: JSON.stringify({contents:[{parts:[{inline_data:{mime_type:"application/pdf",data:base64PDF}},{text:"Find Paulo in Captains. Return ONLY JSON: {\"month\":\"April\",\"year\":2026,\"days\":{\"1\":\"R\",\"2\":\"X\"...}}"}]}]})
             });
-            const tokenData = await tokenRes.json();
-            const accessToken = tokenData.access_token;
+            
+            const gData = await geminiRes.json();
+            const responseText = gData.candidates[0].content.parts[0].text;
+            const schedule = JSON.parse(responseText.match(/\{[\s\S]*\}/)[0]);
 
-            const fileId = '1H45zcAJQlaKT1bu0ABODaJlhbfUq-nOY';
-            const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-              headers: { Authorization: `Bearer ${accessToken}` }
-            });
-            const pdfBuffer = await dlRes.arrayBuffer();
-            const base64PDF = Buffer.from(pdfBuffer).toString("base64");
-
-            // FIXED: Corrected URL and Model Name
-            const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
-            const geminiRes = await fetch(geminiUrl, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                contents: [{ parts: [
-                  { inline_data: { mime_type: "application/pdf", data: base64PDF } },
-                  { text: "Locate 'Paulo' in the 'Captains' section. Extract his schedule for the entire month. Output ONLY raw JSON. Format: {\"month\":\"MonthName\",\"year\":2026,\"days\":{\"1\":\"R\",\"2\":\"X\"...}}" }
-                ]}]
-              })
-            });
-            
-            const geminiData = await geminiRes.json();
-            
-            if (!geminiData.candidates || geminiData.candidates.length === 0) {
-                console.log("Full Gemini Response:", JSON.stringify(geminiData));
-                throw new Error("Gemini returned no results.");
-            }
-            
-            const schedule = JSON.parse(geminiData.candidates[0].content.parts[0].text.replace(/```json|```/g, "").trim());
             const days = schedule.days;
-            const allDays = Object.keys(days).map(Number).sort((a,b) => a-b);
-            const today = new Date();
-            const currentDay = today.getUTCDate();
-            const isCurrentMonth = schedule.month.toLowerCase() === today.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' }).toLowerCase();
-
-            const calendarData = allDays.map(d => {
-              const status = days[d];
-              const isR = status === 'R';
-              const isFirstR = isR && days[d - 1] !== 'R';
-              const isLastR = isR && days[d + 1] !== 'R';
-              let type = (isFirstR || isLastR) ? 'buffer' : (status === 'R' ? 'working' : (status === 'V' ? 'vacation' : 'off'));
-              const todayClass = (isCurrentMonth && d === currentDay) ? 'today' : '';
-              return `${d}:${type}:${todayClass}`;
-            }).join(',');
-
-            const firstDayOfWeek = new Date(`${schedule.month} 1, ${schedule.year}`).getDay();
+            const allDays = Object.keys(days).map(Number).sort((a,b)=>a-b);
+            const calendarData = allDays.map(d => `${d}:${days[d]==='R'?'working':(days[d]==='V'?'vacation':'off')}:`).join(',');
+            const firstDay = new Date(`${schedule.month} 1, ${schedule.year}`).getDay();
 
             await fetch(process.env.TRMNL_WEBHOOK_SCHEDULE, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                merge_variables: {
-                  schedule_month: schedule.month,
-                  schedule_year: String(schedule.year),
-                  calendar_data: calendarData,
-                  first_day: String(firstDayOfWeek),
-                  total_r: String(allDays.filter(d => days[d] === "R").length),
-                  total_x: String(allDays.filter(d => days[d] === "X").length),
-                  total_v: String(allDays.filter(d => days[d] === "V").length),
-                  cache_bust: String(Date.now())
-                }
-              })
+              headers: {"Content-Type":"application/json"},
+              body: JSON.stringify({merge_variables:{
+                schedule_month: schedule.month,
+                schedule_year: String(schedule.year),
+                calendar_data: calendarData,
+                first_day: String(firstDay),
+                total_r: String(allDays.filter(d=>days[d]==='R').length),
+                total_x: String(allDays.filter(d=>days[d]==='X').length),
+                total_v: String(allDays.filter(d=>days[d]==='V').length)
+              }})
             });
-            console.log("Successfully updated TRMNL!");
