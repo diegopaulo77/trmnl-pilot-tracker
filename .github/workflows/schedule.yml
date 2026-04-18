@@ -58,7 +58,7 @@ jobs:
             });
             const base64PDF = Buffer.from(await dlRes.arrayBuffer()).toString("base64");
 
-            // 4. Gemini API Call (With Explicit Aviation Decoder Logic)
+            // 4. Gemini API Call
             const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
             const promptText = `
             You are reading an aviation bid award schedule grid. Locate the specific row for Captain 'Paulo'. Carefully extract his day-by-day schedule for the entire month. 
@@ -85,7 +85,13 @@ jobs:
             });
             
             const gData = await geminiRes.json();
-            const schedule = JSON.parse(gData.candidates[0].content.parts[0].text.replace(/```json|```/g, "").trim());
+            const rawText = gData.candidates[0].content.parts[0].text.replace(/```json|```/g, "").trim();
+            const schedule = JSON.parse(rawText);
+
+            // DEBUG PRINT: This will show up in the GitHub Logs!
+            console.log("=== GEMINI DECODED SCHEDULE ===");
+            console.log(JSON.stringify(schedule, null, 2));
+            console.log("===============================");
 
             // 5. Build TRMNL Data
             const days = schedule.days;
@@ -98,7 +104,6 @@ jobs:
             const calendarData = allDays.map(d => {
               const status = days[d] || 'X';
               
-              // Buffer logic specifically for Reserve (R) days
               const isR = status === 'R';
               const isFirstR = isR && days[d - 1] !== 'R';
               const isLastR = isR && days[d + 1] !== 'R';
@@ -129,7 +134,8 @@ jobs:
                   first_day: String(firstDay),
                   total_r: String(allDays.filter(d => days[d] === 'R' || days[d] === 'SIM').length),
                   total_x: String(allDays.filter(d => days[d] === 'X' || !days[d]).length),
-                  total_v: String(allDays.filter(d => days[d] === 'V').length)
+                  total_v: String(allDays.filter(d => days[d] === 'V').length),
+                  cache_bust: String(Date.now()) // FIXED: Forcing TRMNL to update!
                 }
               })
             });
