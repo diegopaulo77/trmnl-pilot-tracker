@@ -19,7 +19,7 @@ jobs:
             const crypto = require('crypto');
             const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
             
-            // 1. Google Drive Auth (Restored to the working version)
+            // 1. Google Drive Auth
             const jwtHeader = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
             const now = Math.floor(Date.now() / 1000);
             const jwtClaim = Buffer.from(JSON.stringify({
@@ -41,10 +41,6 @@ jobs:
               body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`
             });
             const tokenData = await tokenRes.json();
-            
-            if (!tokenData.access_token) {
-              throw new Error(`Auth failed! Google responded: ${JSON.stringify(tokenData)}`);
-            }
             const access_token = tokenData.access_token;
 
             // 2. Search the Folder for the Newest PDF
@@ -54,50 +50,72 @@ jobs:
               { headers: { Authorization: `Bearer ${access_token}` } }
             );
             const searchData = await searchRes.json();
-            
-            if (!searchData.files || searchData.files.length === 0) {
-              throw new Error(`No PDF found in folder! Drive response: ${JSON.stringify(searchData)}`);
-            }
-            
             const file = searchData.files[0];
-            console.log(`Processing newest schedule: ${file.name}`);
 
             // 3. Download the PDF
             const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, {
               headers: { Authorization: `Bearer ${access_token}` }
             });
-            
-            if (!dlRes.ok) {
-              const driveError = await dlRes.text();
-              throw new Error(`Google Drive blocked download! Status: ${dlRes.status} | Details: ${driveError}`);
-            }
-            
             const base64PDF = Buffer.from(await dlRes.arrayBuffer()).toString("base64");
 
-            // 4. Gemini API Call
+            // 4. Gemini API Call (With Explicit Aviation Decoder Logic)
             const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+            const promptText = `
+            You are reading an aviation bid award schedule grid. Locate the specific row for Captain 'Paulo'. Carefully extract his day-by-day schedule for the entire month. 
+            Use this STRICT decoding legend:
+            - 'R' = R
+            - 'X' = X
+            - 'V' = V
+            - Any other alphanumeric code in a grid cell (like PT, PC, LC, etc.) = SIM
+            - Empty/blank cells should be inferred based on the column alignment, usually meaning X.
+            
+            Return ONLY a valid JSON object. No markdown, no commentary.
+            Format: {"month":"April","year":2026,"days":{"1":"R","2":"X","3":"SIM","4":"V"}}
+            `;
+            
             const geminiRes = await fetch(geminiUrl, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 contents: [{ parts: [
                   { inline_data: { mime_type: "application/pdf", data: base64PDF } },
-                  { text: "Find 'Paulo' in Captains. Identify month/year. Return ONLY JSON: {\"month\":\"April\",\"year\":2026,\"days\":{\"1\":\"R\",\"2\":\"X\"...}}" }
+                  { text: promptText }
                 ]}]
               })
             });
             
             const gData = await geminiRes.json();
-            if (!gData.candidates) {
-              throw new Error(`Gemini error: ${JSON.stringify(gData)}`);
-            }
-            
             const schedule = JSON.parse(gData.candidates[0].content.parts[0].text.replace(/```json|```/g, "").trim());
 
-            // 5. Send to TRMNL
+            // 5. Build TRMNL Data
             const days = schedule.days;
             const allDays = Object.keys(days).map(Number).sort((a,b)=>a-b);
-            const calendarData = allDays.map(d => `${d}:${days[d]==='R'?'working':(days[d]==='V'?'vacation':'off')}:`).join(',');
+            
+            const today = new Date();
+            const currentDay = today.getUTCDate();
+            const isCurrentMonth = schedule.month.toLowerCase() === today.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' }).toLowerCase();
+
+            const calendarData = allDays.map(d => {
+              const status = days[d] || 'X';
+              
+              // Buffer logic specifically for Reserve (R) days
+              const isR = status === 'R';
+              const isFirstR = isR && days[d - 1] !== 'R';
+              const isLastR = isR && days[d + 1] !== 'R';
+              
+              let type = 'off';
+              if (isFirstR || isLastR) {
+                type = 'buffer';
+              } else if (status === 'R' || status === 'SIM') {
+                type = 'working';
+              } else if (status === 'V') {
+                type = 'vacation';
+              }
+              
+              const todayClass = (isCurrentMonth && d === currentDay) ? 'today' : '';
+              return `${d}:${type}:${todayClass}`;
+            }).join(',');
+
             const firstDay = new Date(`${schedule.month} 1, ${schedule.year}`).getDay();
 
             await fetch(process.env.TRMNL_WEBHOOK_SCHEDULE, {
@@ -109,9 +127,9 @@ jobs:
                   schedule_year: String(schedule.year),
                   calendar_data: calendarData,
                   first_day: String(firstDay),
-                  total_r: String(allDays.filter(d=>days[d]==='R').length),
-                  total_x: String(allDays.filter(d=>days[d]==='X').length),
-                  total_v: String(allDays.filter(d=>days[d]==='V').length)
+                  total_r: String(allDays.filter(d => days[d] === 'R' || days[d] === 'SIM').length),
+                  total_x: String(allDays.filter(d => days[d] === 'X' || !days[d]).length),
+                  total_v: String(allDays.filter(d => days[d] === 'V').length)
                 }
               })
             });
