@@ -61,15 +61,22 @@ jobs:
             // 4. Gemini API Call
             const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
             const promptText = `
-            You are reading an aviation bid award schedule grid. Locate the specific row for Captain 'Paulo'. Carefully extract his day-by-day schedule for the entire month. 
+            You are an expert data extractor reading an aviation bid award schedule grid. 
+            
+            Follow these EXACT steps:
+            1. Find the section for 'Captains' and locate the exact row for the pilot 'Paulo'.
+            2. Read that row horizontally, cell by cell, from left to right.
+            3. The columns correspond sequentially to the days of the month (Day 1, Day 2, Day 3... up to the last day).
+            4. There is exactly ONE value per day. 
+            5. PAY EXTREME ATTENTION to visual spacing and column alignment. If a column is visually blank or empty for that day, you MUST output 'X'. Do not skip days.
+            
             Use this STRICT decoding legend:
             - 'R' = R
-            - 'X' = X
             - 'V' = V
-            - Any other alphanumeric code in a grid cell (like PT, PC, LC, etc.) = SIM
-            - Empty/blank cells should be inferred based on the column alignment, usually meaning X.
+            - Blank cell, empty space, or 'X' = X
+            - Any other alphanumeric code (PT, PC, LC, etc.) = SIM
             
-            Return ONLY a valid JSON object. No markdown, no commentary.
+            Return ONLY a valid JSON object. No markdown, no formatting blocks, no commentary.
             Format: {"month":"April","year":2026,"days":{"1":"R","2":"X","3":"SIM","4":"V"}}
             `;
             
@@ -88,7 +95,6 @@ jobs:
             const rawText = gData.candidates[0].content.parts[0].text.replace(/```json|```/g, "").trim();
             const schedule = JSON.parse(rawText);
 
-            // DEBUG PRINT: This will show up in the GitHub Logs!
             console.log("=== GEMINI DECODED SCHEDULE ===");
             console.log(JSON.stringify(schedule, null, 2));
             console.log("===============================");
@@ -135,7 +141,7 @@ jobs:
                   total_r: String(allDays.filter(d => days[d] === 'R' || days[d] === 'SIM').length),
                   total_x: String(allDays.filter(d => days[d] === 'X' || !days[d]).length),
                   total_v: String(allDays.filter(d => days[d] === 'V').length),
-                  cache_bust: String(Date.now()) // FIXED: Forcing TRMNL to update!
+                  cache_bust: String(Date.now())
                 }
               })
             });
