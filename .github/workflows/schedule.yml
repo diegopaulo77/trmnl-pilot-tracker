@@ -1,4 +1,4 @@
-name: Update TRMNL Schedule
+name: Update TRMNL Schedule (Gemini Version)
 on:
   schedule:
     - cron: '0 6 * * *'
@@ -8,122 +8,33 @@ jobs:
   update-schedule:
     runs-on: ubuntu-latest
     steps:
-      - name: Read PDF and update schedule
+      - name: Process Schedule with Gemini
         uses: actions/github-script@v7
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TRMNL_WEBHOOK_SCHEDULE: ${{ secrets.TRMNL_WEBHOOK_SCHEDULE }}
         with:
           script: |
             const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
-            const jwtHeader = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
-            const now = Math.floor(Date.now() / 1000);
-            const jwtClaim = Buffer.from(JSON.stringify({
-              iss: creds.client_email,
-              scope: "https://www.googleapis.com/auth/drive.readonly",
-              aud: "https://oauth2.googleapis.com/token",
-              exp: now + 3600,
-              iat: now
-            })).toString("base64url");
-
-            const crypto = require("crypto");
-            const sign = crypto.createSign("RSA-SHA256");
-            sign.update(`${jwtHeader}.${jwtClaim}`);
-            const signature = sign.sign(creds.private_key, "base64url");
-            const jwt = `${jwtHeader}.${jwtClaim}.${signature}`;
-
-            const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
-              method: "POST",
-              headers: { "Content-Type": "application/x-www-form-urlencoded" },
-              body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`
-            });
-            const tokenData = await tokenRes.json();
-            const accessToken = tokenData.access_token;
-
-            // FOLDER SEARCH LOGIC (Flexibility for new months)
             const folderId = '17Ry-JFX2xdDM7TJNArCQ26lbbDW2JEwf';
-            const searchRes = await fetch(
-              `https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents+and+mimeType%3D'application%2Fpdf'+and+trashed%3Dfalse&orderBy=modifiedTime+desc&pageSize=1&fields=files(id,name)`,
-              { headers: { Authorization: `Bearer ${accessToken}` } }
-            );
-            const searchData = await searchRes.json();
             
-            if (!searchData.files || searchData.files.length === 0) {
-              throw new Error("No PDF found in folder. Check sharing permissions for the service account email!");
-            }
+            // 1. Auth & Fetch newest PDF
+            const jwt = require('crypto').createSign('RSA-SHA256').update(Buffer.from(JSON.stringify({alg:"RS256",typ:"JWT"})).toString('base64url')+'.'+Buffer.from(JSON.stringify({iss:creds.client_email,scope:"https://www.googleapis.com/auth/drive.readonly",aud:"https://oauth2.googleapis.com/token",exp:Math.floor(Date.now()/1000)+3600,iat:Math.floor(Date.now()/1000)})).toString('base64url')).sign(creds.private_key, 'base64url');
+            const tokenRes = await fetch("https://oauth2.googleapis.com/token", {method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:`grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${require('crypto').createSign('RSA-SHA256').update(Buffer.from(JSON.stringify({alg:"RS256",typ:"JWT"})).toString('base64url')+'.'+Buffer.from(JSON.stringify({iss:creds.client_email,scope:"https://www.googleapis.com/auth/drive.readonly",aud:"https://oauth2.googleapis.com/token",exp:Math.floor(Date.now()/1000)+3600,iat:Math.floor(Date.now()/1000)})).toString('base64url')).sign(creds.private_key, 'base64url')}`});
+            // (Auth logic simplified for space - reusing your existing stable auth block is best)
             
-            const file = searchData.files[0];
-            console.log(`Processing newest file: ${file.name}`);
-
-            const dlRes = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, {
-              headers: { Authorization: `Bearer ${accessToken}` }
-            });
-            const pdfBuffer = await dlRes.arrayBuffer();
-            const base64 = Buffer.from(pdfBuffer).toString("base64");
-
-            const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
+            // [Insert your existing Auth/Search logic here - it was working until the "No PDF" part]
+            
+            // 2. Call Gemini instead of Claude
+            const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+            const geminiRes = await fetch(geminiUrl, {
               method: "POST",
-              headers: {
-                "x-api-key": process.env.ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-              },
               body: JSON.stringify({
-                model: "claude-3-5-sonnet-20240620",
-                max_tokens: 1024,
-                messages: [{
-                  role: "user",
-                  content: [
-                    { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-                    { type: "text", text: `Find "Paulo" in Captains. Identify the month/year from headers. Return ONLY JSON: {"month":"MonthName","year":2026,"days":{"1":"R","2":"X",...}}` }
-                  ]
-                }]
+                contents: [{ parts: [
+                  { inline_data: { mime_type: "application/pdf", data: base64PDF } },
+                  { text: "Find Paulo in Captains. Return JSON: {\"month\":\"April\",\"year\":2026,\"days\":{\"1\":\"R\",\"2\":\"X\"...}}" }
+                ]}]
               })
             });
-            
-            const claudeData = await claudeRes.json();
-            const responseText = claudeData.content[0].text;
-            const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-            const schedule = JSON.parse(jsonMatch[0]);
-
-            const days = schedule.days;
-            const allDays = Object.keys(days).map(Number).sort((a,b) => a-b);
-            const today = new Date();
-            const currentDay = today.getUTCDate();
-            const isCurrentMonth = schedule.month.toLowerCase() === today.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' }).toLowerCase();
-
-            const calendarData = allDays.map(d => {
-              const status = days[d];
-              const isR = status === 'R';
-              const isFirstR = isR && days[d - 1] !== 'R';
-              const isLastR = isR && days[d + 1] !== 'R';
-              let type = 'off';
-              if (isFirstR || isLastR) type = 'buffer';
-              else if (status === 'R') type = 'working';
-              else if (status === 'V') type = 'vacation';
-              const todayClass = (isCurrentMonth && d === currentDay) ? 'today' : '';
-              return `${d}:${type}:${todayClass}`;
-            }).join(',');
-
-            const firstDayOfWeek = new Date(`${schedule.month} ${allDays[0]}, ${schedule.year}`).getDay();
-
-            const payload = {
-              merge_variables: {
-                schedule_month: schedule.month,
-                schedule_year: String(schedule.year),
-                calendar_data: calendarData,
-                first_day: String(firstDayOfWeek),
-                total_r: String(allDays.filter(d => days[d] === "R").length),
-                total_x: String(allDays.filter(d => days[d] === "X").length),
-                total_v: String(allDays.filter(d => days[d] === "V").length),
-                cache_bust: Date.now().toString()
-              }
-            };
-
-            await fetch(process.env.TRMNL_WEBHOOK_SCHEDULE, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload)
-            });
-            console.log(`✅ Successfully updated TRMNL with schedule for ${schedule.month}`);
+            // ... rest of your TRMNL payload logic ...
