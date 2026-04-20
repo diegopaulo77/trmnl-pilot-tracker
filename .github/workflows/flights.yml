@@ -21,11 +21,24 @@ jobs:
               { reg: "N904AR", hex: "AC7E18" }
             ];
 
+            function toRad(d) { return d * Math.PI / 180; }
+            function haversine(lat1, lon1, lat2, lon2) {
+              const R = 3440.065;
+              const dLat = toRad(lat2 - lat1);
+              const dLon = toRad(lon2 - lon1);
+              const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+              return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            }
+
+            function compassDir(deg) {
+              const dirs = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
+              return dirs[Math.round(deg / 22.5) % 16];
+            }
+
             const allFlights = [];
 
             for (const ac of aircraft) {
               try {
-                // Check real-time flight by hex code
                 const res = await fetch(
                   `https://airlabs.co/api/v9/flights?api_key=${API_KEY}&hex=${ac.hex}`
                 );
@@ -33,45 +46,63 @@ jobs:
 
                 if (data.response && data.response.length > 0) {
                   const f = data.response[0];
+                  const alt = f.alt ? Math.round(f.alt * 3.28084) : 0;
+                  const speed = f.speed ? Math.round(f.speed * 0.539957) : 0;
+                  const heading = f.dir ? Math.round(f.dir) : 0;
+                  const headingDir = f.dir ? compassDir(f.dir) : "";
+
+                  let progress = 0;
+                  let depLat = 0, depLon = 0, arrLat = 0, arrLon = 0;
+                  let etaStr = "--:--";
+
+                  if (f.dep_lat && f.dep_lng && f.arr_lat && f.arr_lng && f.lat && f.lng) {
+                    const totalDist = haversine(f.dep_lat, f.dep_lng, f.arr_lat, f.arr_lng);
+                    const flown = haversine(f.dep_lat, f.dep_lng, f.lat, f.lng);
+                    progress = Math.min(Math.round((flown / totalDist) * 100), 99);
+                    
+                    const remaining = totalDist - flown;
+                    if (speed > 0) {
+                      const hoursLeft = remaining / speed;
+                      const eta = new Date(Date.now() + hoursLeft * 3600000);
+                      etaStr = eta.toLocaleTimeString("en-US", {
+                        hour: "2-digit", minute: "2-digit",
+                        hour12: false, timeZone: "America/New_York"
+                      });
+                    }
+                  }
+
                   allFlights.push({
                     reg: ac.reg,
                     flight: f.flight_iata || f.flight_icao || "N/A",
                     dep: f.dep_iata || f.dep_icao || "???",
                     arr: f.arr_iata || f.arr_icao || "???",
                     status: f.status || "en-route",
-                    alt: f.alt ? Math.round(f.alt * 3.28084) : 0,
-                    speed: f.speed ? Math.round(f.speed * 0.539957) : 0,
-                    lat: f.lat || 0,
-                    lon: f.lng || 0,
-                    updated: f.updated || 0,
+                    alt: String(alt),
+                    speed: String(speed),
+                    heading: `${heading}° ${headingDir}`,
+                    progress: String(progress),
+                    eta: etaStr,
                     active: true
                   });
                 } else {
                   allFlights.push({
-                    reg: ac.reg,
-                    flight: "",
-                    dep: "",
-                    arr: "",
-                    status: "on-ground",
-                    alt: 0,
-                    speed: 0,
-                    lat: 0,
-                    lon: 0,
-                    updated: 0,
+                    reg: ac.reg, flight: "--", dep: "--", arr: "--",
+                    status: "on-ground", alt: "0", speed: "0",
+                    heading: "--", progress: "0", eta: "--:--",
                     active: false
                   });
                 }
               } catch(e) {
                 console.log(`Error fetching ${ac.reg}: ${e.message}`);
                 allFlights.push({
-                  reg: ac.reg, flight: "", dep: "", arr: "",
-                  status: "error", alt: 0, speed: 0, lat: 0, lon: 0,
-                  updated: 0, active: false
+                  reg: ac.reg, flight: "--", dep: "--", arr: "--",
+                  status: "error", alt: "0", speed: "0",
+                  heading: "--", progress: "0", eta: "--:--",
+                  active: false
                 });
               }
             }
 
-            // Build compact data strings for TRMNL
             const ac1 = allFlights[0];
             const ac2 = allFlights[1];
 
@@ -83,21 +114,17 @@ jobs:
 
             const payload = {
               merge_variables: {
-                ac1_reg: ac1.reg,
-                ac1_flight: ac1.flight || "--",
-                ac1_dep: ac1.dep || "--",
-                ac1_arr: ac1.arr || "--",
-                ac1_status: ac1.status,
-                ac1_alt: String(ac1.alt),
-                ac1_speed: String(ac1.speed),
+                ac1_reg: ac1.reg, ac1_flight: ac1.flight,
+                ac1_dep: ac1.dep, ac1_arr: ac1.arr,
+                ac1_status: ac1.status, ac1_alt: ac1.alt,
+                ac1_speed: ac1.speed, ac1_heading: ac1.heading,
+                ac1_progress: ac1.progress, ac1_eta: ac1.eta,
                 ac1_active: ac1.active ? "true" : "false",
-                ac2_reg: ac2.reg,
-                ac2_flight: ac2.flight || "--",
-                ac2_dep: ac2.dep || "--",
-                ac2_arr: ac2.arr || "--",
-                ac2_status: ac2.status,
-                ac2_alt: String(ac2.alt),
-                ac2_speed: String(ac2.speed),
+                ac2_reg: ac2.reg, ac2_flight: ac2.flight,
+                ac2_dep: ac2.dep, ac2_arr: ac2.arr,
+                ac2_status: ac2.status, ac2_alt: ac2.alt,
+                ac2_speed: ac2.speed, ac2_heading: ac2.heading,
+                ac2_progress: ac2.progress, ac2_eta: ac2.eta,
                 ac2_active: ac2.active ? "true" : "false",
                 last_check: timeStr,
                 cache_bust: now.getTime().toString()
@@ -110,6 +137,6 @@ jobs:
               body: JSON.stringify(payload)
             });
             console.log(`TRMNL: ${trmnlRes.ok ? "✅" : "❌"} ${trmnlRes.status}`);
-            console.log(`N903AR: ${ac1.active ? "✈ " + ac1.dep + "→" + ac1.arr : "On ground"}`);
-            console.log(`N904AR: ${ac2.active ? "✈ " + ac2.dep + "→" + ac2.arr : "On ground"}`);
+            console.log(`N903AR: ${ac1.active ? "✈ " + ac1.dep + "→" + ac1.arr + " " + ac1.progress + "%" : "On ground"}`);
+            console.log(`N904AR: ${ac2.active ? "✈ " + ac2.dep + "→" + ac2.arr + " " + ac2.progress + "%" : "On ground"}`);
             console.log(`Checked at: ${timeStr} ET`);
