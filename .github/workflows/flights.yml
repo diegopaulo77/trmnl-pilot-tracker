@@ -1,0 +1,115 @@
+name: Update TRMNL Fleet Tracker
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  update-flights:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Track fleet and update TRMNL
+        uses: actions/github-script@v7
+        env:
+          AIRLABS_API_KEY: ${{ secrets.AIRLABS_API_KEY }}
+          TRMNL_WEBHOOK_FLIGHTS: ${{ secrets.TRMNL_WEBHOOK_FLIGHTS }}
+        with:
+          script: |
+            const API_KEY = process.env.AIRLABS_API_KEY;
+            const aircraft = [
+              { reg: "N903AR", hex: "AC7A61" },
+              { reg: "N904AR", hex: "AC7E18" }
+            ];
+
+            const allFlights = [];
+
+            for (const ac of aircraft) {
+              try {
+                // Check real-time flight by hex code
+                const res = await fetch(
+                  `https://airlabs.co/api/v9/flights?api_key=${API_KEY}&hex=${ac.hex}`
+                );
+                const data = await res.json();
+
+                if (data.response && data.response.length > 0) {
+                  const f = data.response[0];
+                  allFlights.push({
+                    reg: ac.reg,
+                    flight: f.flight_iata || f.flight_icao || "N/A",
+                    dep: f.dep_iata || f.dep_icao || "???",
+                    arr: f.arr_iata || f.arr_icao || "???",
+                    status: f.status || "en-route",
+                    alt: f.alt ? Math.round(f.alt * 3.28084) : 0,
+                    speed: f.speed ? Math.round(f.speed * 0.539957) : 0,
+                    lat: f.lat || 0,
+                    lon: f.lng || 0,
+                    updated: f.updated || 0,
+                    active: true
+                  });
+                } else {
+                  allFlights.push({
+                    reg: ac.reg,
+                    flight: "",
+                    dep: "",
+                    arr: "",
+                    status: "on-ground",
+                    alt: 0,
+                    speed: 0,
+                    lat: 0,
+                    lon: 0,
+                    updated: 0,
+                    active: false
+                  });
+                }
+              } catch(e) {
+                console.log(`Error fetching ${ac.reg}: ${e.message}`);
+                allFlights.push({
+                  reg: ac.reg, flight: "", dep: "", arr: "",
+                  status: "error", alt: 0, speed: 0, lat: 0, lon: 0,
+                  updated: 0, active: false
+                });
+              }
+            }
+
+            // Build compact data strings for TRMNL
+            const ac1 = allFlights[0];
+            const ac2 = allFlights[1];
+
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString("en-US", {
+              hour: "2-digit", minute: "2-digit",
+              hour12: false, timeZone: "America/New_York"
+            });
+
+            const payload = {
+              merge_variables: {
+                ac1_reg: ac1.reg,
+                ac1_flight: ac1.flight || "--",
+                ac1_dep: ac1.dep || "--",
+                ac1_arr: ac1.arr || "--",
+                ac1_status: ac1.status,
+                ac1_alt: String(ac1.alt),
+                ac1_speed: String(ac1.speed),
+                ac1_active: ac1.active ? "true" : "false",
+                ac2_reg: ac2.reg,
+                ac2_flight: ac2.flight || "--",
+                ac2_dep: ac2.dep || "--",
+                ac2_arr: ac2.arr || "--",
+                ac2_status: ac2.status,
+                ac2_alt: String(ac2.alt),
+                ac2_speed: String(ac2.speed),
+                ac2_active: ac2.active ? "true" : "false",
+                last_check: timeStr,
+                cache_bust: now.getTime().toString()
+              }
+            };
+
+            const trmnlRes = await fetch(process.env.TRMNL_WEBHOOK_FLIGHTS, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+            console.log(`TRMNL: ${trmnlRes.ok ? "✅" : "❌"} ${trmnlRes.status}`);
+            console.log(`N903AR: ${ac1.active ? "✈ " + ac1.dep + "→" + ac1.arr : "On ground"}`);
+            console.log(`N904AR: ${ac2.active ? "✈ " + ac2.dep + "→" + ac2.arr : "On ground"}`);
+            console.log(`Checked at: ${timeStr} ET`);
