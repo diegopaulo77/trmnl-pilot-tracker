@@ -21,6 +21,28 @@ jobs:
               { reg: "N904AR", hex: "AC7E18" }
             ];
 
+            // Cache for airport coordinates
+            const airportCache = {};
+
+            async function getAirportCoords(code) {
+              if (!code || code === "???" || code === "--") return null;
+              if (airportCache[code]) return airportCache[code];
+              try {
+                const res = await fetch(
+                  `https://airlabs.co/api/v9/airports?iata_code=${code}&api_key=${API_KEY}&_fields=iata_code,lat,lng,name`
+                );
+                const data = await res.json();
+                if (data.response && data.response.length > 0) {
+                  const apt = data.response[0];
+                  airportCache[code] = { lat: apt.lat, lon: apt.lng, name: apt.name };
+                  return airportCache[code];
+                }
+              } catch(e) {
+                console.log(`Airport lookup error for ${code}: ${e.message}`);
+              }
+              return null;
+            }
+
             function toRad(d) { return d * Math.PI / 180; }
             function haversine(lat1, lon1, lat2, lon2) {
               const R = 3440.065;
@@ -40,7 +62,7 @@ jobs:
             for (const ac of aircraft) {
               try {
                 const res = await fetch(
-                  `https://airlabs.co/api/v9/flights?api_key=${API_KEY}&hex=${ac.hex}`
+                  `https://airlabs.co/api/v9/flights?api_key=${API_KEY}&reg_number=${ac.reg}`
                 );
                 const data = await res.json();
 
@@ -50,16 +72,22 @@ jobs:
                   const speed = f.speed ? Math.round(f.speed * 0.539957) : 0;
                   const heading = f.dir ? Math.round(f.dir) : 0;
                   const headingDir = f.dir ? compassDir(f.dir) : "";
+                  const depCode = f.dep_iata || f.dep_icao || "???";
+                  const arrCode = f.arr_iata || f.arr_icao || "???";
 
                   let progress = 0;
-                  let depLat = 0, depLon = 0, arrLat = 0, arrLon = 0;
                   let etaStr = "--:--";
 
-                  if (f.dep_lat && f.dep_lng && f.arr_lat && f.arr_lng && f.lat && f.lng) {
-                    const totalDist = haversine(f.dep_lat, f.dep_lng, f.arr_lat, f.arr_lng);
-                    const flown = haversine(f.dep_lat, f.dep_lng, f.lat, f.lng);
+                  // Look up airport coordinates for progress calculation
+                  const depApt = await getAirportCoords(depCode);
+                  const arrApt = await getAirportCoords(arrCode);
+
+                  if (depApt && arrApt && f.lat && f.lng) {
+                    const totalDist = haversine(depApt.lat, depApt.lon, arrApt.lat, arrApt.lon);
+                    const flown = haversine(depApt.lat, depApt.lon, f.lat, f.lng);
                     progress = Math.min(Math.round((flown / totalDist) * 100), 99);
-                    
+                    progress = Math.max(progress, 1);
+
                     const remaining = totalDist - flown;
                     if (speed > 0) {
                       const hoursLeft = remaining / speed;
@@ -73,9 +101,9 @@ jobs:
 
                   allFlights.push({
                     reg: ac.reg,
-                    flight: f.flight_iata || f.flight_icao || "N/A",
-                    dep: f.dep_iata || f.dep_icao || "???",
-                    arr: f.arr_iata || f.arr_icao || "???",
+                    flight: f.flight_iata || f.flight_icao || f.flight_number || "N/A",
+                    dep: depCode,
+                    arr: arrCode,
                     status: f.status || "en-route",
                     alt: String(alt),
                     speed: String(speed),
@@ -84,6 +112,7 @@ jobs:
                     eta: etaStr,
                     active: true
                   });
+                  console.log(`${ac.reg}: ${depCode}→${arrCode} | ${progress}% | ${alt}ft | ${speed}kts | ETA ${etaStr}`);
                 } else {
                   allFlights.push({
                     reg: ac.reg, flight: "--", dep: "--", arr: "--",
@@ -91,6 +120,7 @@ jobs:
                     heading: "--", progress: "0", eta: "--:--",
                     active: false
                   });
+                  console.log(`${ac.reg}: On ground`);
                 }
               } catch(e) {
                 console.log(`Error fetching ${ac.reg}: ${e.message}`);
@@ -137,6 +167,4 @@ jobs:
               body: JSON.stringify(payload)
             });
             console.log(`TRMNL: ${trmnlRes.ok ? "✅" : "❌"} ${trmnlRes.status}`);
-            console.log(`N903AR: ${ac1.active ? "✈ " + ac1.dep + "→" + ac1.arr + " " + ac1.progress + "%" : "On ground"}`);
-            console.log(`N904AR: ${ac2.active ? "✈ " + ac2.dep + "→" + ac2.arr + " " + ac2.progress + "%" : "On ground"}`);
             console.log(`Checked at: ${timeStr} ET`);
