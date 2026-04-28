@@ -1,7 +1,7 @@
 name: Update TRMNL Location
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -47,24 +47,81 @@ jobs:
             const latest = points[points.length - 1];
             const { lat, lon } = latest;
 
+            // Reverse geocode
             const geoRes = await fetch(
-              `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`,
+              `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json&zoom=5`,
               { headers: { "User-Agent": "TRMNL-Garmin-Plugin/3.0" } }
             );
             const geoData = await geoRes.json();
-            const city = geoData.address?.city || geoData.address?.town || geoData.address?.village || geoData.address?.county || "Unknown area";
-            const country = geoData.address?.country || "";
-            const isHome = city.includes("Fort Lauderdale") || "Fort Lauderdale".includes(city);
-            const locationDisplay = country ? `${city}, ${country}` : city;
 
+            // Handle ocean/water locations
+            let locationDisplay = "";
+            let isHome = false;
+            const isWater = geoData.error || (!geoData.address?.city && !geoData.address?.town && !geoData.address?.village && !geoData.address?.county && !geoData.address?.state);
+
+            if (isWater) {
+              // Try to identify which body of water
+              const waterName = geoData.display_name || "";
+              if (waterName.toLowerCase().includes("atlantic")) {
+                locationDisplay = "Flying over the Atlantic Ocean";
+              } else if (waterName.toLowerCase().includes("pacific")) {
+                locationDisplay = "Flying over the Pacific Ocean";
+              } else if (waterName.toLowerCase().includes("caribbean")) {
+                locationDisplay = "Flying over the Caribbean Sea";
+              } else if (waterName.toLowerCase().includes("gulf of mexico")) {
+                locationDisplay = "Flying over the Gulf of Mexico";
+              } else if (waterName.toLowerCase().includes("arctic")) {
+                locationDisplay = "Flying over the Arctic Ocean";
+              } else if (waterName.toLowerCase().includes("indian")) {
+                locationDisplay = "Flying over the Indian Ocean";
+              } else if (waterName.toLowerCase().includes("mediterranean")) {
+                locationDisplay = "Flying over the Mediterranean";
+              } else if (waterName.toLowerCase().includes("north sea")) {
+                locationDisplay = "Flying over the North Sea";
+              } else {
+                locationDisplay = "Flying over the sea";
+              }
+            } else {
+              const city = geoData.address?.city || geoData.address?.town || geoData.address?.village || geoData.address?.county || geoData.address?.state || "Unknown area";
+              const country = geoData.address?.country || "";
+              isHome = city.includes("Fort Lauderdale") || "Fort Lauderdale".includes(city);
+              locationDisplay = country ? `${city}, ${country}` : city;
+            }
+
+            // Timezone + time difference from Fort Lauderdale
             let timezoneId = "UTC";
+            let timeDiff = "";
             try {
               const timestamp = Math.floor(now.getTime() / 1000);
+
+              // Get timezone at current location
               const tzRes = await fetch(`https://maps.googleapis.com/maps/api/timezone/json?location=${lat},${lon}&timestamp=${timestamp}&key=${process.env.GOOGLE_MAPS_API_KEY}`);
               const tzData = await tzRes.json();
-              if (tzData.status === "OK") timezoneId = tzData.timeZoneId;
+
+              // Get Fort Lauderdale timezone
+              const homeTzRes = await fetch(`https://maps.googleapis.com/maps/api/timezone/json?location=26.1224,-80.1373&timestamp=${timestamp}&key=${process.env.GOOGLE_MAPS_API_KEY}`);
+              const homeTzData = await homeTzRes.json();
+
+              if (tzData.status === "OK") {
+                timezoneId = tzData.timeZoneId;
+
+                if (homeTzData.status === "OK") {
+                  const localOffset = tzData.rawOffset + tzData.dstOffset;
+                  const homeOffset = homeTzData.rawOffset + homeTzData.dstOffset;
+                  const diffHours = (localOffset - homeOffset) / 3600;
+
+                  if (diffHours === 0) {
+                    timeDiff = "Same time";
+                  } else if (diffHours > 0) {
+                    timeDiff = `+${diffHours}h`;
+                  } else {
+                    timeDiff = `${diffHours}h`;
+                  }
+                }
+              }
             } catch(e) { console.log(`Timezone error: ${e.message}`); }
 
+            // Last seen
             const diffMinutes = Math.round((now - latest.time) / 60000);
             let timeAgo;
             if (diffMinutes < 2) timeAgo = "Just now";
@@ -85,7 +142,9 @@ jobs:
               merge_variables: {
                 location: locationDisplay,
                 is_home: isHome ? "true" : "false",
+                is_water: isWater ? "true" : "false",
                 timezone_id: timezoneId,
+                time_diff: timeDiff,
                 time_ago: timeAgo,
                 formatted_time: formattedTime,
                 lat: lat.toFixed(4),
@@ -100,4 +159,4 @@ jobs:
               body: JSON.stringify(payload)
             });
             console.log(`BW: ${bwRes.ok ? "✅" : "❌"} ${bwRes.status}`);
-            console.log(`✅ Done! ${locationDisplay} | isHome: ${isHome} | TZ: ${timezoneId} | ${timeAgo}`);
+            console.log(`✅ Done! ${locationDisplay} | isHome: ${isHome} | TZ: ${timezoneId} | Diff: ${timeDiff} | ${timeAgo}`);
