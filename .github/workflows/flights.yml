@@ -1,7 +1,7 @@
 name: Update TRMNL Fleet Tracker
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -15,31 +15,27 @@ jobs:
           TRMNL_WEBHOOK_FLIGHTS: ${{ secrets.TRMNL_WEBHOOK_FLIGHTS }}
         with:
           script: |
-            const API_KEY = process.env.AIRLABS_API_KEY;
             const aircraft = [
-              { reg: "N903AR", hex: "AC7A61" },
-              { reg: "N904AR", hex: "AC7E18" }
+              { reg: "N903AR", hex: "ac7a61" },
+              { reg: "N904AR", hex: "ac7e18" }
             ];
 
-            // Cache for airport coordinates
-            const airportCache = {};
+            // Known airport coordinates cache (persists within this run)
+            const airportCoords = {};
 
             async function getAirportCoords(code) {
-              if (!code || code === "???" || code === "--") return null;
-              if (airportCache[code]) return airportCache[code];
+              if (!code || code === "???") return null;
+              if (airportCoords[code]) return airportCoords[code];
               try {
                 const res = await fetch(
-                  `https://airlabs.co/api/v9/airports?iata_code=${code}&api_key=${API_KEY}&_fields=iata_code,lat,lng,name`
+                  `https://airlabs.co/api/v9/airports?iata_code=${code}&api_key=${process.env.AIRLABS_API_KEY}&_fields=iata_code,lat,lng`
                 );
                 const data = await res.json();
                 if (data.response && data.response.length > 0) {
-                  const apt = data.response[0];
-                  airportCache[code] = { lat: apt.lat, lon: apt.lng, name: apt.name };
-                  return airportCache[code];
+                  airportCoords[code] = { lat: data.response[0].lat, lon: data.response[0].lng };
+                  return airportCoords[code];
                 }
-              } catch(e) {
-                console.log(`Airport lookup error for ${code}: ${e.message}`);
-              }
+              } catch(e) { console.log(`Airport lookup error: ${e.message}`); }
               return null;
             }
 
@@ -59,61 +55,101 @@ jobs:
 
             const allFlights = [];
 
-            for (const ac of aircraft) {
-              try {
-                const res = await fetch(
-                  `https://airlabs.co/api/v9/flights?api_key=${API_KEY}&reg_number=${ac.reg}`
-                );
-                const data = await res.json();
+            // Step 1: Check OpenSky for real-time positions (FREE, unlimited)
+            try {
+              const hexList = aircraft.map(a => a.hex).join("&icao24=");
+              const osRes = await fetch(
+                `https://opensky-network.org/api/states/all?icao24=${hexList}`
+              );
 
-                if (data.response && data.response.length > 0) {
-                  const f = data.response[0];
-                  const alt = f.alt ? Math.round(f.alt * 3.28084) : 0;
-                  const speed = f.speed ? Math.round(f.speed * 0.539957) : 0;
-                  const heading = f.dir ? Math.round(f.dir) : 0;
-                  const headingDir = f.dir ? compassDir(f.dir) : "";
-                  const depCode = f.dep_iata || f.dep_icao || "???";
-                  const arrCode = f.arr_iata || f.arr_icao || "???";
+              if (!osRes.ok) {
+                console.log(`OpenSky error: ${osRes.status}`);
+              }
 
+              const osData = await osRes.json();
+              const states = osData.states || [];
+
+              for (const ac of aircraft) {
+                const state = states.find(s => s[0] === ac.hex);
+
+                if (state) {
+                  // Aircraft is airborne!
+                  const callsign = (state[1] || "").trim();
+                  const lat = state[6];
+                  const lon = state[5];
+                  const altMeters = state[7] || state[13] || 0;
+                  const alt = Math.round(altMeters * 3.28084);
+                  const speedMs = state[9] || 0;
+                  const speed = Math.round(speedMs * 1.94384);
+                  const heading = state[10] ? Math.round(state[10]) : 0;
+                  const headingDir = state[10] ? compassDir(state[10]) : "";
+                  const onGround = state[8];
+
+                  if (onGround) {
+                    allFlights.push({
+                      reg: ac.reg, flight: callsign || "--", dep: "--", arr: "--",
+                      status: "on-ground", alt: "0", speed: "0",
+                      heading: "--", progress: "0", eta: "--:--",
+                      active: false
+                    });
+                    console.log(`${ac.reg}: On ground (detected by OpenSky)`);
+                    continue;
+                  }
+
+                  // Step 2: Get flight details from AirLabs (only when aircraft is flying)
+                  let dep = "???";
+                  let arr = "???";
+                  let flightNum = callsign || "N/A";
                   let progress = 0;
                   let etaStr = "--:--";
 
-                  // Look up airport coordinates for progress calculation
-                  const depApt = await getAirportCoords(depCode);
-                  const arrApt = await getAirportCoords(arrCode);
+                  try {
+                    const alRes = await fetch(
+                      `https://airlabs.co/api/v9/flights?api_key=${process.env.AIRLABS_API_KEY}&hex=${ac.hex}`
+                    );
+                    const alData = await alRes.json();
+                    if (alData.response && alData.response.length > 0) {
+                      const f = alData.response[0];
+                      dep = f.dep_iata || f.dep_icao || "???";
+                      arr = f.arr_iata || f.arr_icao || "???";
+                      flightNum = f.flight_iata || f.flight_icao || callsign || "N/A";
 
-                  if (depApt && arrApt && f.lat && f.lng) {
-                    const totalDist = haversine(depApt.lat, depApt.lon, arrApt.lat, arrApt.lon);
-                    const flown = haversine(depApt.lat, depApt.lon, f.lat, f.lng);
-                    progress = Math.min(Math.round((flown / totalDist) * 100), 99);
-                    progress = Math.max(progress, 1);
+                      // Calculate progress using airport coordinates
+                      const depApt = await getAirportCoords(dep);
+                      const arrApt = await getAirportCoords(arr);
 
-                    const remaining = totalDist - flown;
-                    if (speed > 0) {
-                      const hoursLeft = remaining / speed;
-                      const eta = new Date(Date.now() + hoursLeft * 3600000);
-                      etaStr = eta.toLocaleTimeString("en-US", {
-                        hour: "2-digit", minute: "2-digit",
-                        hour12: false, timeZone: "America/New_York"
-                      });
+                      if (depApt && arrApt && lat && lon) {
+                        const totalDist = haversine(depApt.lat, depApt.lon, arrApt.lat, arrApt.lon);
+                        const flown = haversine(depApt.lat, depApt.lon, lat, lon);
+                        progress = Math.max(1, Math.min(Math.round((flown / totalDist) * 100), 99));
+
+                        const remaining = totalDist - flown;
+                        if (speed > 0) {
+                          const hoursLeft = remaining / speed;
+                          const eta = new Date(Date.now() + hoursLeft * 3600000);
+                          etaStr = eta.toLocaleTimeString("en-US", {
+                            hour: "2-digit", minute: "2-digit",
+                            hour12: false, timeZone: "America/New_York"
+                          });
+                        }
+                      }
                     }
+                  } catch(e) {
+                    console.log(`AirLabs lookup for ${ac.reg}: ${e.message}`);
                   }
 
                   allFlights.push({
-                    reg: ac.reg,
-                    flight: f.flight_iata || f.flight_icao || f.flight_number || "N/A",
-                    dep: depCode,
-                    arr: arrCode,
-                    status: f.status || "en-route",
-                    alt: String(alt),
-                    speed: String(speed),
+                    reg: ac.reg, flight: flightNum,
+                    dep, arr, status: "en-route",
+                    alt: String(alt), speed: String(speed),
                     heading: `${heading}° ${headingDir}`,
-                    progress: String(progress),
-                    eta: etaStr,
+                    progress: String(progress), eta: etaStr,
                     active: true
                   });
-                  console.log(`${ac.reg}: ${depCode}→${arrCode} | ${progress}% | ${alt}ft | ${speed}kts | ETA ${etaStr}`);
+                  console.log(`${ac.reg}: ✈ ${dep}→${arr} | ${progress}% | ${alt}ft | ${speed}kts | ETA ${etaStr}`);
+
                 } else {
+                  // Not found in OpenSky = on ground or out of coverage
                   allFlights.push({
                     reg: ac.reg, flight: "--", dep: "--", arr: "--",
                     status: "on-ground", alt: "0", speed: "0",
@@ -122,8 +158,11 @@ jobs:
                   });
                   console.log(`${ac.reg}: On ground`);
                 }
-              } catch(e) {
-                console.log(`Error fetching ${ac.reg}: ${e.message}`);
+              }
+            } catch(e) {
+              console.log(`OpenSky fetch error: ${e.message}`);
+              // Fallback: mark both as unknown
+              for (const ac of aircraft) {
                 allFlights.push({
                   reg: ac.reg, flight: "--", dep: "--", arr: "--",
                   status: "error", alt: "0", speed: "0",
@@ -131,6 +170,16 @@ jobs:
                   active: false
                 });
               }
+            }
+
+            // Ensure we always have 2 entries
+            while (allFlights.length < 2) {
+              allFlights.push({
+                reg: "???", flight: "--", dep: "--", arr: "--",
+                status: "error", alt: "0", speed: "0",
+                heading: "--", progress: "0", eta: "--:--",
+                active: false
+              });
             }
 
             const ac1 = allFlights[0];
