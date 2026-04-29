@@ -1,7 +1,7 @@
 name: Update TRMNL Schedule
 on:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
@@ -112,7 +112,6 @@ jobs:
             console.log(`Claude raw: ${rawText.substring(0, 100)}...`);
             const schedule = JSON.parse(rawText);
 
-            // FORCE correct year — override whatever Claude returns
             const currentYear = new Date().getFullYear();
             schedule.year = currentYear;
 
