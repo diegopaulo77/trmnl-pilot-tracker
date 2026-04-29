@@ -19,7 +19,6 @@ jobs:
             const crypto = require('crypto');
             const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
             
-            // 1. Google Drive Auth
             const jwtHeader = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
             const now = Math.floor(Date.now() / 1000);
             const jwtClaim = Buffer.from(JSON.stringify({
@@ -43,7 +42,6 @@ jobs:
             const tokenData = await tokenRes.json();
             const access_token = tokenData.access_token;
 
-            // 2. Search & Download PDF
             const folderId = '17Ry-JFX2xdDM7TJNArCQ26lbbDW2JEwf';
             const searchRes = await fetch(
               `https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents+and+mimeType%3D'application%2Fpdf'+and+trashed%3Dfalse&orderBy=modifiedTime+desc&pageSize=1&fields=files(id,name)`,
@@ -58,7 +56,6 @@ jobs:
             });
             const base64PDF = Buffer.from(await dlRes.arrayBuffer()).toString("base64");
 
-            // 3. Claude API Call
             const promptText = `
             You are an expert data extractor reading an aviation bid award schedule grid. 
             
@@ -75,7 +72,7 @@ jobs:
             - Any other alphanumeric code (PT, PC, LC, etc.) = SIM
             
             Return ONLY a valid JSON object. No markdown, no formatting blocks, no explanation, no preamble, no text before or after the JSON. Your entire response must be parseable JSON and nothing else.
-            Format: {"month":"April","year":2026,"days":{"1":"R","2":"X","3":"SIM","4":"V"}}
+            Format: {"month":"May","year":2026,"days":{"1":"R","2":"X","3":"SIM","4":"V"}}
             `;
             
             const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
@@ -115,11 +112,14 @@ jobs:
             console.log(`Claude raw: ${rawText.substring(0, 100)}...`);
             const schedule = JSON.parse(rawText);
 
+            // FORCE correct year — override whatever Claude returns
+            const currentYear = new Date().getFullYear();
+            schedule.year = currentYear;
+
             console.log("=== CLAUDE DECODED SCHEDULE ===");
             console.log(JSON.stringify(schedule, null, 2));
             console.log("===============================");
 
-            // 4. Send to TRMNL
             const days = schedule.days;
             const allDays = Object.keys(days).map(Number).sort((a,b)=>a-b);
             
